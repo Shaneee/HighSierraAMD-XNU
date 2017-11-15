@@ -371,7 +371,7 @@ tsc_init(void)
             uint64_t did;
             uint64_t fid;
             
-            cofvid  = rdmsr64(AMD_PSTATE0_STS);
+            cofvid  = rdmsr64(AMD_PSTATE0_STATUS);
             did = bitfield(cofvid, 13, 8);
             fid = bitfield(cofvid, 7, 0);
             if (did == 0) divisor = 1;

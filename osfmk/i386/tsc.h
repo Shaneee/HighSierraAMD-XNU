@@ -47,7 +47,7 @@
 
 #define AMD_FIDVID_STATUS 0xC0010042  /* AMD's 0fh version of the MSR */
 #define AMD_COFVID_STATUS 0xC0010071  /* AMD's 10h - 16h version of the MSR */
-#define AMD_PSTATE0_STS 0xC0010064    /* AMD's 17h MSR */
+#define AMD_PSTATE0_STATUS 0xC0010064    /* AMD's 17h Ryzen MSR */
 
 #ifndef ASSEMBLER
 extern uint64_t	busFCvtt2n;
