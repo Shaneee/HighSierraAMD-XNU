@@ -777,21 +777,37 @@ cpuid_set_cache_info( i386_cpu_info_t * info_p )
 static void
 cpuid_set_generic_info(i386_cpu_info_t *info_p)
 {
-    uint32_t	reg[4];
+    uint32_t    reg[4];
     char            str[128], *p;
+    unsigned char dummyvar;
     
     DBG("cpuid_set_generic_info(%p)\n", info_p);
     
     /* do cpuid 0 to get vendor */
-    cpuid_fn(0, reg);
-    info_p->cpuid_max_basic = reg[eax];
+    static char Genu[5] = "Genu";
+    static char ineI[5] = "ineI";
+    static char ntel[5] = "ntel";
+    
+    /* Made by Bronzovka, adapted by AnV */
+    if (PE_parse_boot_argn("-emulateintel", &dummyvar, sizeof(dummyvar)))
+    {
+        do_cpuid(0, reg);
+        info_p->cpuid_max_basic = reg[eax];
+        bcopy(Genu, (char *)&reg[ebx], 4); /* ug */
+        bcopy(ntel, (char *)&reg[ecx], 4);
+        bcopy(ineI, (char *)&reg[edx], 4);
+    } else {
+        do_cpuid(0, reg);
+        info_p->cpuid_max_basic = reg[eax];
+    }
+    
     bcopy((char *)&reg[ebx], &info_p->cpuid_vendor[0], 4); /* ug */
     bcopy((char *)&reg[ecx], &info_p->cpuid_vendor[8], 4);
     bcopy((char *)&reg[edx], &info_p->cpuid_vendor[4], 4);
     info_p->cpuid_vendor[12] = 0;
     
     /* get extended cpuid results */
-    cpuid_fn(0x80000000, reg);
+    do_cpuid(0x80000000, reg);
     info_p->cpuid_max_ext = reg[eax];
     
     /* check to see if we can get brand string */
@@ -800,11 +816,11 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
          * The brand string 48 bytes (max), guaranteed to
          * be NUL terminated.
          */
-        cpuid_fn(0x80000002, reg);
+        do_cpuid(0x80000002, reg);
         bcopy((char *)reg, &str[0], 16);
-        cpuid_fn(0x80000003, reg);
+        do_cpuid(0x80000003, reg);
         bcopy((char *)reg, &str[16], 16);
-        cpuid_fn(0x80000004, reg);
+        do_cpuid(0x80000004, reg);
         bcopy((char *)reg, &str[32], 16);
         for (p = str; *p != '\0'; p++) {
             if (*p != ' ') break;
@@ -857,10 +873,18 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
      * and bracket this with the approved procedure for reading the
      * the microcode version number a.k.a. signature a.k.a. BIOS ID
      */
-    //wrmsr64(MSR_IA32_BIOS_SIGN_ID, 0);
-    cpuid_fn(1, reg);
-    //info_p->cpuid_microcode_version =
-    //	(uint32_t) (rdmsr64(MSR_IA32_BIOS_SIGN_ID) >> 32);
+
+    if (IsIntelCPU())
+    {
+        wrmsr64(MSR_IA32_BIOS_SIGN_ID, 0);
+        do_cpuid(1, reg);
+        info_p->cpuid_microcode_version =
+        (uint32_t) (rdmsr64(MSR_IA32_BIOS_SIGN_ID) >> 32);
+    } else {
+        do_cpuid(1, reg);
+        info_p->cpuid_microcode_version = 21;
+    }
+    
     info_p->cpuid_signature = reg[eax];
     info_p->cpuid_stepping  = bitfield32(reg[eax],  3,  0);
     info_p->cpuid_model     = bitfield32(reg[eax],  7,  4);
@@ -873,7 +897,12 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
     info_p->cpuid_features  = quad(reg[ecx], reg[edx]) & ~CPUID_FEATURE_PAT;
     
     /* Get "processor flag"; necessary for microcode update matching */
-    info_p->cpuid_processor_flag = 0;
+    if (IsIntelCPU())
+    {
+        info_p->cpuid_processor_flag = (rdmsr64(MSR_IA32_PLATFORM_ID)>> 50) & 0x7;
+    } else {
+        info_p->cpuid_processor_flag = 1;
+    }
     
     /* Fold extensions into family/model */
     if (info_p->cpuid_family == 0x0f)
@@ -888,10 +917,16 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
         info_p->cpuid_logical_per_package = 1;
     
     if (info_p->cpuid_max_ext >= 0x80000001) {
-        cpuid_fn(0x80000001, reg);
-        info_p->cpuid_extfeatures =
-        quad(reg[ecx], reg[edx]) & ~CPUID_EXTFEATURE_XD;
-        /* Sinetek: AMD doesn't like the XD bit. */
+        do_cpuid(0x80000001, reg);
+        if (IsIntelCPU())
+        {
+            info_p->cpuid_extfeatures =
+            quad(reg[ecx], reg[edx]);
+        } else {
+            /* Sinetek: AMD doesn't like the XD bit. */
+            info_p->cpuid_extfeatures =
+            quad(reg[ecx], reg[edx]) & ~CPUID_EXTFEATURE_XD;
+        }
     }
 
 	DBG(" max_basic           : %d\n", info_p->cpuid_max_basic);
@@ -1017,80 +1052,90 @@ cpuid_set_generic_info(i386_cpu_info_t *info_p)
         /*
          * Leaf7 Features:
          */
-        cpuid_fn(0x7, reg);
-        info_p->cpuid_leaf7_features = reg[ebx];
+        if (IsIntelCPU())
+        {
+            do_cpuid(0x7, reg);
+            info_p->cpuid_leaf7_features = reg[ebx];
+        }
         
         DBG(" Feature Leaf7:\n");
         DBG("  EBX           : 0x%x\n", reg[ebx]);
+    } else {
+        // if (info_p->cpuid_model == 0x1) {
+        //     do_cpuid(0x7, reg);
+        //     info_p->cpuid_leaf7_features = reg[ebx];
+        
+        //     DBG(" Feature Leaf7:\n");
+        //     DBG("  EBX           : 0x%x\n", reg[ebx]);
+        
+        // } else
+        info_p->cpuid_leaf7_features = 0;
     }
-
-	return;
+    
+    return;
 }
 
 static uint32_t
 cpuid_set_cpufamily(i386_cpu_info_t *info_p)
 {
-	uint32_t cpufamily = CPUFAMILY_UNKNOWN;
-
-	switch (info_p->cpuid_family) {
-	case 6:
-		switch (info_p->cpuid_model) {
-		case 15:
-			cpufamily = CPUFAMILY_INTEL_MEROM;
-			break;
-		case 23:
-			cpufamily = CPUFAMILY_INTEL_PENRYN;
-			break;
-		case CPUID_MODEL_NEHALEM:
-		case CPUID_MODEL_FIELDS:
-		case CPUID_MODEL_DALES:
-		case CPUID_MODEL_NEHALEM_EX:
-			cpufamily = CPUFAMILY_INTEL_NEHALEM;
-			break;
-		case CPUID_MODEL_DALES_32NM:
-		case CPUID_MODEL_WESTMERE:
-		case CPUID_MODEL_WESTMERE_EX:
-			cpufamily = CPUFAMILY_INTEL_WESTMERE;
-			break;
-		case CPUID_MODEL_SANDYBRIDGE:
-		case CPUID_MODEL_JAKETOWN:
-			cpufamily = CPUFAMILY_INTEL_SANDYBRIDGE;
-			break;
-		case CPUID_MODEL_IVYBRIDGE:
-		case CPUID_MODEL_IVYBRIDGE_EP:
-			cpufamily = CPUFAMILY_INTEL_IVYBRIDGE;
-			break;
-		case CPUID_MODEL_HASWELL:
-		case CPUID_MODEL_HASWELL_EP:
-		case CPUID_MODEL_HASWELL_ULT:
-		case CPUID_MODEL_CRYSTALWELL:
-			cpufamily = CPUFAMILY_INTEL_HASWELL;
-			break;
-		case CPUID_MODEL_BROADWELL:
-		case CPUID_MODEL_BRYSTALWELL:
-			cpufamily = CPUFAMILY_INTEL_BROADWELL;
-			break;
-		case CPUID_MODEL_SKYLAKE:
-		case CPUID_MODEL_SKYLAKE_DT:
-			cpufamily = CPUFAMILY_INTEL_SKYLAKE;
-			break;
-		}
-		break;
-	}
-
-    info_p->cpuid_cpufamily = cpufamily;
-    DBG("cpuid_set_cpufamily(%p) returning 0x%x\n", info_p, cpufamily);
+    uint32_t cpufamily = CPUFAMILY_INTEL_MEROM;
     
-    /* AnV - Fix AMD CPU Family to Intel Penryn */
-    /** This is needed to boot because the dyld assumes that an UNKNOWN
-     ** Platform is HASWELL-capable, dropping an SSE4.2 'pcmpistri' on us during bcopies.
-     **/
-    if (IsAmdCPU())
+    if (IsIntelCPU())
     {
+        switch (info_p->cpuid_family) {
+            case 6:
+                switch (info_p->cpuid_model) {
+                    case 15:
+                        cpufamily = CPUFAMILY_INTEL_MEROM;
+                        break;
+                    case 23:
+                        cpufamily = CPUFAMILY_INTEL_PENRYN;
+                        break;
+                    case CPUID_MODEL_NEHALEM:
+                    case CPUID_MODEL_FIELDS:
+                    case CPUID_MODEL_DALES:
+                    case CPUID_MODEL_NEHALEM_EX:
+                        cpufamily = CPUFAMILY_INTEL_NEHALEM;
+                        break;
+                    case CPUID_MODEL_DALES_32NM:
+                    case CPUID_MODEL_WESTMERE:
+                    case CPUID_MODEL_WESTMERE_EX:
+                        cpufamily = CPUFAMILY_INTEL_WESTMERE;
+                        break;
+                    case CPUID_MODEL_SANDYBRIDGE:
+                    case CPUID_MODEL_JAKETOWN:
+                        cpufamily = CPUFAMILY_INTEL_SANDYBRIDGE;
+                        break;
+                    case CPUID_MODEL_IVYBRIDGE:
+                    case CPUID_MODEL_IVYBRIDGE_EP:
+                        cpufamily = CPUFAMILY_INTEL_IVYBRIDGE;
+                        break;
+                    case CPUID_MODEL_HASWELL:
+                    case CPUID_MODEL_HASWELL_ULT:
+                    case CPUID_MODEL_CRYSTALWELL:
+                        cpufamily = CPUFAMILY_INTEL_HASWELL;
+                        break;
+                }
+                break;
+                
+            case 15:
+                switch (info_p->cpuid_model) {
+                    case 2:
+                        cpufamily = CPU_FAMILY_PENTIUM_4_M2;
+                        break;
+                    case 4:
+                        cpufamily = CPU_FAMILY_PENTIUM_4;
+                        break;
+                }
+                break;
+        }
+    } else {
+        // Bronzovka : here should hw.cpufamily = 0x78ea4fbc
         cpufamily = CPUFAMILY_INTEL_PENRYN;
-        info_p->cpuid_cpufamily = cpufamily;
     }
     
+    info_p->cpuid_cpufamily = cpufamily;
+    DBG("cpuid_set_cpufamily(%p) returning 0x%x\n", info_p, cpufamily);
     return cpufamily;
 }
 
@@ -1123,28 +1168,92 @@ FixAMDTLB(void)
 void
 cpuid_set_info(void)
 {
-    i386_cpu_info_t		*info_p = &cpuid_cpu_info;
+    i386_cpu_info_t        *info_p = &cpuid_cpu_info;
+    boolean_t        enable_x86_64h = TRUE;
+    uint32_t dummyVar;
     
     cpuid_set_generic_info(info_p);
-    
-    /* verify we are running on a supported CPU */
-    /*if ((strncmp(CPUID_VID_INTEL, info_p->cpuid_vendor,
-     min(strlen(CPUID_STRING_UNKNOWN) + 1,
-     sizeof(info_p->cpuid_vendor)))) ||
-     (cpuid_set_cpufamily(info_p) == CPUFAMILY_UNKNOWN))
-     panic("Unsupported CPU");*/
     cpuid_set_cpufamily(info_p);
     
     info_p->cpuid_cpu_type = CPU_TYPE_X86;
-    info_p->cpuid_cpu_subtype = CPU_SUBTYPE_X86_ARCH1;
-    /* Must be invoked after set_generic_info */
-    /* check if running on AMD, call right cache info function */
-    if(!strncmp(CPUID_VID_AMD, info_p->cpuid_vendor,
-                min(strlen(CPUID_STRING_UNKNOWN) + 1,
-                    sizeof(info_p->cpuid_vendor)))) {
-                    cpuid_set_AMDcache_info(info_p);
-                } else cpuid_set_cache_info(info_p);
     
+    if (!PE_parse_boot_argn("-enable_x86_64h", &enable_x86_64h, sizeof(enable_x86_64h))) {
+        boolean_t        disable_x86_64h = FALSE;
+        
+        if (PE_parse_boot_argn("-disable_x86_64h", &disable_x86_64h, sizeof(disable_x86_64h))) {
+            enable_x86_64h = FALSE;
+        }
+    }
+    
+    if (enable_x86_64h &&
+        ((info_p->cpuid_features & CPUID_X86_64_H_FEATURE_SUBSET) == CPUID_X86_64_H_FEATURE_SUBSET) &&
+        ((info_p->cpuid_extfeatures & CPUID_X86_64_H_EXTFEATURE_SUBSET) == CPUID_X86_64_H_EXTFEATURE_SUBSET) &&
+        ((info_p->cpuid_leaf7_features & CPUID_X86_64_H_LEAF7_FEATURE_SUBSET) == CPUID_X86_64_H_LEAF7_FEATURE_SUBSET)) {
+        info_p->cpuid_cpu_subtype = CPU_SUBTYPE_X86_64_H;
+    } else {
+        info_p->cpuid_cpu_subtype = CPU_SUBTYPE_X86_ARCH1;
+    }
+    
+    /* Must be invoked after set_generic_info */
+    if (IsIntelCPU())
+        cpuid_set_cache_info(info_p);
+    else {
+        if (PE_parse_boot_argn("-amdtlbfix", &dummyVar, sizeof(dummyVar)))
+        {
+            FixAMDTLB();
+        }
+        
+        get_amd_cache_info(&cpuid_cpu_info);
+        
+        if (PE_parse_boot_argn("-emulateintel", &dummyVar, sizeof(dummyVar)))
+        {
+            if (info_p->cpuid_cores_per_package >= 3)
+            {
+                /* Xeon for 3 cores or more... */
+                info_p->cpuid_signature = 0x00010676; /* Xeon Signature */
+                
+                /* Set Xeon brand string */
+                strlcpy(info_p->cpuid_brand_string, CPUID_BRAND_XEON, sizeof(CPUID_BRAND_XEON));
+            } else {
+                /* Core 2 Duo for 2 cores or less... */
+                info_p->cpuid_signature = 0x0001067A; /* Core 2 Duo Signature */
+                
+                /* Set Core 2 Duo brand string */
+                strlcpy(info_p->cpuid_brand_string, CPUID_BRAND_CORE2, sizeof(CPUID_BRAND_CORE2));
+            }
+            
+            info_p->cpuid_stepping  = bitfield32(info_p->cpuid_signature,  3,  0);
+            /*info_p->cpuid_model     = bitfield32(info_p->cpuid_signature,  7,  4);
+             info_p->cpuid_family    = bitfield32(info_p->cpuid_signature, 11,  8);*/
+            info_p->cpuid_type      = bitfield32(info_p->cpuid_signature, 13, 12);
+            info_p->cpuid_extmodel  = bitfield32(info_p->cpuid_signature, 19, 16);
+            info_p->cpuid_extfamily = bitfield32(info_p->cpuid_signature, 27, 20);
+            info_p->cpuid_brand     = 0;
+            
+            /* Correct family and model due to Intel norms... */
+            /*if (info_p->cpuid_family == 0x0f)
+             info_p->cpuid_family += info_p->cpuid_extfamily;
+             if (info_p->cpuid_family == 0x0f || info_p->cpuid_family == 0x06)
+             info_p->cpuid_model += (info_p->cpuid_extmodel << 4);*/
+        }
+    }
+    
+    /* AnV - Fix cpuid features bit for SSE3 / SSSE3 and CPU family to PENRYN for Intel too (Pentium 4 fix) - Thanks to Sinetek for the suggestion... */
+    // Bro: or other cpufamily
+    if (!(info_p->cpuid_features & CPUID_FEATURE_SSE3) || !(info_p->cpuid_features & CPUID_FEATURE_SSSE3))
+    {
+        info_p->cpuid_features |= CPUID_FEATURE_SSE3;
+        info_p->cpuid_features |= CPUID_FEATURE_SSSE3;
+        /* Needed for CPU's without SSSE3 like 64-bit Pentium 4 */
+        info_p->cpuid_cpufamily = CPUFAMILY_INTEL_PENRYN;
+        
+        /* Graphics fix */
+        if (IsAmdCPU())
+        {
+            info_p->cpuid_features &= !CPUID_FEATURE_SSE4_2;
+        }
+    }
+
     /*
      * Find the number of enabled cores and threads
      * (which determines whether SMT/Hyperthreading is active).
@@ -1173,6 +1282,8 @@ cpuid_set_info(void)
     DBG("cpuid_set_info():\n");
     DBG("  core_count   : %d\n", info_p->core_count);
     DBG("  thread_count : %d\n", info_p->thread_count);
+    DBG("       cpu_type: 0x%08x\n", info_p->cpuid_cpu_type);
+    DBG("    cpu_subtype: 0x%08x\n", info_p->cpuid_cpu_subtype);
     
     info_p->cpuid_model_string = ""; /* deprecated */
 }
@@ -1411,25 +1522,30 @@ cpuid_cpu_display(
 unsigned int
 cpuid_family(void)
 {
-	return cpuid_info()->cpuid_family;
+    return cpuid_info()->cpuid_family;
 }
 
 uint32_t
 cpuid_cpufamily(void)
 {
-	return cpuid_info()->cpuid_cpufamily;
+    if (IsAmdCPU())
+    {
+        return CPUFAMILY_INTEL_PENRYN;
+    }
+    
+    return cpuid_info()->cpuid_cpufamily;
 }
 
 cpu_type_t
 cpuid_cputype(void)
 {
-	return cpuid_info()->cpuid_cpu_type;
+    return cpuid_info()->cpuid_cpu_type;
 }
 
 cpu_subtype_t
 cpuid_cpusubtype(void)
 {
-	return cpuid_info()->cpuid_cpu_subtype;
+    return cpuid_info()->cpuid_cpu_subtype;
 }
 
 uint64_t
@@ -1482,36 +1598,38 @@ cpuid_init_vmm_info(i386_vmm_info_t *info_p)
 	if (!cpuid_vmm_present())
 		return; */
 
-	DBG("cpuid_init_vmm_info(%p)\n", info_p);
-
-	/* do cpuid 0x40000000 to get VMM vendor */
-	cpuid_fn(0x40000000, reg);
-	max_vmm_leaf = reg[eax];
-	bcopy((char *)&reg[ebx], &info_p->cpuid_vmm_vendor[0], 4);
-	bcopy((char *)&reg[ecx], &info_p->cpuid_vmm_vendor[4], 4);
-	bcopy((char *)&reg[edx], &info_p->cpuid_vmm_vendor[8], 4);
-	info_p->cpuid_vmm_vendor[12] = '\0';
-	/*
-	if (0 == strcmp(info_p->cpuid_vmm_vendor, CPUID_VMM_ID_VMWARE)) {
-		info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_VMWARE;
-	} else if (0 == strcmp(info_p->cpuid_vmm_vendor, CPUID_VMM_ID_PARALLELS)) {
-		info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_PARALLELS;
-	} else {
-		info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_UNKNOWN;
-	} */
-info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_VMWARE;
-	/* VMM generic leaves: https://lkml.org/lkml/2008/10/1/246 */
-	if (max_vmm_leaf >= 0x40000010) {
-		cpuid_fn(0x40000010, reg);
-		
-		info_p->cpuid_vmm_tsc_frequency = reg[eax];
-		info_p->cpuid_vmm_bus_frequency = reg[ebx];
-	}
-
-	DBG(" vmm_vendor          : %s\n", info_p->cpuid_vmm_vendor);
-	DBG(" vmm_family          : %u\n", info_p->cpuid_vmm_family);
-	DBG(" vmm_bus_frequency   : %u\n", info_p->cpuid_vmm_bus_frequency);
-	DBG(" vmm_tsc_frequency   : %u\n", info_p->cpuid_vmm_tsc_frequency);
+    DBG("cpuid_init_vmm_info(%p)\n", info_p);
+    
+    /* do cpuid 0x40000000 to get VMM vendor */
+    do_cpuid(0x40000000, reg);
+    max_vmm_leaf = reg[eax];
+    bcopy((char *)&reg[ebx], &info_p->cpuid_vmm_vendor[0], 4);
+    bcopy((char *)&reg[ecx], &info_p->cpuid_vmm_vendor[4], 4);
+    bcopy((char *)&reg[edx], &info_p->cpuid_vmm_vendor[8], 4);
+    info_p->cpuid_vmm_vendor[12] = '\0';
+    
+    if (0 == strcmp(info_p->cpuid_vmm_vendor, CPUID_VMM_ID_VMWARE)) {
+        /* VMware identification string: kb.vmware.com/kb/1009458 */
+        info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_VMWARE;
+    } else if (0 == strcmp(info_p->cpuid_vmm_vendor, CPUID_VMM_ID_PARALLELS)) {
+        /* Parallels identification string */
+        info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_PARALLELS;
+    } else {
+        info_p->cpuid_vmm_family = CPUID_VMM_FAMILY_UNKNOWN;
+    }
+    
+    /* VMM generic leaves: https://lkml.org/lkml/2008/10/1/246 */
+    if (max_vmm_leaf >= 0x40000010) {
+        do_cpuid(0x40000010, reg);
+        
+        info_p->cpuid_vmm_tsc_frequency = reg[eax];
+        info_p->cpuid_vmm_bus_frequency = reg[ebx];
+    }
+    
+    DBG(" vmm_vendor          : %s\n", info_p->cpuid_vmm_vendor);
+    DBG(" vmm_family          : %u\n", info_p->cpuid_vmm_family);
+    DBG(" vmm_bus_frequency   : %u\n", info_p->cpuid_vmm_bus_frequency);
+    DBG(" vmm_tsc_frequency   : %u\n", info_p->cpuid_vmm_tsc_frequency);
 }
 
 boolean_t
